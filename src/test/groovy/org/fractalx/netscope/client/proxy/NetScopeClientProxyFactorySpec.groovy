@@ -1,6 +1,8 @@
 package org.fractalx.netscope.client.proxy
 
 import org.fractalx.netscope.client.annotation.NetScopeClient
+import org.fractalx.netscope.client.annotation.SetAttribute
+import org.fractalx.netscope.client.config.NetScopeClientConfig
 import org.fractalx.netscope.client.core.NetScopeChannelFactory
 import org.fractalx.netscope.client.core.NetScopeTemplate
 import org.fractalx.netscope.client.core.NetScopeValueConverter
@@ -25,6 +27,31 @@ class NetScopeClientProxyFactorySpec extends Specification {
     @NetScopeClient(server = "svc", beanName = "SomeService", value = "customBeanName")
     interface CustomNamedClient {
         void ping()
+    }
+
+    // P2: inline auth interfaces
+    @NetScopeClient(host = "localhost", port = 9090,
+                    authType = NetScopeClientConfig.AuthType.API_KEY, apiKey = "secret-key",
+                    beanName = "SecureService")
+    interface ApiKeyInlineClient {
+        String getData()
+    }
+
+    @NetScopeClient(host = "localhost", port = 9090,
+                    authType = NetScopeClientConfig.AuthType.OAUTH, tokenProvider = "myTokenBean",
+                    beanName = "OAuthService")
+    interface OAuthInlineClient {
+        String getData()
+    }
+
+    // P1a: @SetAttribute on interface method
+    @NetScopeClient(server = "svc", beanName = "MyBean")
+    interface FieldWriterClient {
+        @SetAttribute("count")
+        int setCount(int value)
+
+        @SetAttribute          // defaults field name to method name
+        String label(String v)
     }
 
     // ── Invalid interfaces ────────────────────────────────────────────────────
@@ -128,6 +155,66 @@ class NetScopeClientProxyFactorySpec extends Specification {
         def p2 = factory.createProxy(GreeterClient.class)
         expect:
         !p1.equals(p2)
+    }
+
+    // ── P2: inline auth — proxy creation ─────────────────────────────────────
+
+    def "createProxy: inline API_KEY client creates proxy without error"() {
+        when:
+        def proxy = factory.createProxy(ApiKeyInlineClient.class)
+        then:
+        proxy != null
+        proxy instanceof ApiKeyInlineClient
+    }
+
+    def "createProxy: inline OAUTH client creates proxy without error"() {
+        when:
+        def proxy = factory.createProxy(OAuthInlineClient.class)
+        then:
+        proxy != null
+        proxy instanceof OAuthInlineClient
+    }
+
+    def "createProxy: inline API_KEY proxy toString contains host and port"() {
+        given:
+        def proxy = factory.createProxy(ApiKeyInlineClient.class)
+        when:
+        def str = proxy.toString()
+        then:
+        str.contains("localhost")
+        str.contains("9090")
+        str.contains("SecureService")
+    }
+
+    // ── P1a: @SetAttribute on interface methods ────────────────────────────────
+
+    def "createProxy: interface with @SetAttribute methods creates proxy without error"() {
+        when:
+        def proxy = factory.createProxy(FieldWriterClient.class)
+        then:
+        proxy != null
+        proxy instanceof FieldWriterClient
+    }
+
+    def "createProxy: @SetAttribute method with explicit value uses that field name"() {
+        given:
+        def proxy = factory.createProxy(FieldWriterClient.class)
+        def method = FieldWriterClient.getMethod("setCount", int.class)
+        when:
+        def annotation = method.getAnnotation(SetAttribute.class)
+        then:
+        annotation != null
+        annotation.value() == "count"
+    }
+
+    def "createProxy: @SetAttribute method with blank value defaults to method name"() {
+        given:
+        def method = FieldWriterClient.getMethod("label", String.class)
+        when:
+        def annotation = method.getAnnotation(SetAttribute.class)
+        then:
+        annotation != null
+        annotation.value() == ""     // blank — handler will use method name "label"
     }
 
     // ── createProxy — validation errors ──────────────────────────────────────

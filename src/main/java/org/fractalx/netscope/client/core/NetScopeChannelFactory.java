@@ -50,13 +50,31 @@ public class NetScopeChannelFactory implements DisposableBean {
     }
 
     /**
-     * Returns a cached channel for an inline host/port.
-     * Uses {@link NetScopeClientConfig.AuthConfig} defaults (NONE) for auth.
+     * Returns a cached channel for an inline host/port with no authentication.
      */
     public ManagedChannel channelFor(String host, int port) {
-        String key = host + ":" + port;
-        return channels.computeIfAbsent(key, k ->
-            buildChannel(host, port, new NetScopeClientConfig.AuthConfig()));
+        return channelFor(host, port, new NetScopeClientConfig.AuthConfig());
+    }
+
+    /**
+     * Returns a cached channel for an inline host/port with the supplied auth configuration.
+     * The cache key incorporates auth details so that two clients pointing at the same
+     * host:port but with different credentials each get their own channel.
+     */
+    public ManagedChannel channelFor(String host, int port, NetScopeClientConfig.AuthConfig auth) {
+        String key = buildInlineCacheKey(host, port, auth);
+        return channels.computeIfAbsent(key, k -> buildChannel(host, port, auth));
+    }
+
+    private String buildInlineCacheKey(String host, int port, NetScopeClientConfig.AuthConfig auth) {
+        if (auth == null || auth.getType() == NetScopeClientConfig.AuthType.NONE) {
+            return host + ":" + port;
+        }
+        return switch (auth.getType()) {
+            case API_KEY -> host + ":" + port + ":apikey:" + auth.getApiKey();
+            case OAUTH   -> host + ":" + port + ":oauth:"  + auth.getTokenProvider();
+            default      -> host + ":" + port;
+        };
     }
 
     private ManagedChannel buildChannel(String host, int port, NetScopeClientConfig.AuthConfig auth) {
