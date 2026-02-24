@@ -10,10 +10,16 @@ import io.grpc.inprocess.InProcessChannelBuilder
 import io.grpc.inprocess.InProcessServerBuilder
 import io.grpc.stub.StreamObserver
 import org.fractalx.netscope.client.annotation.NetScopeClient
+import org.fractalx.netscope.client.annotation.SetAttribute
 import org.fractalx.netscope.client.exception.NetScopeRemoteException
+import org.fractalx.netscope.client.grpc.proto.DocsRequest
+import org.fractalx.netscope.client.grpc.proto.DocsResponse
 import org.fractalx.netscope.client.grpc.proto.InvokeRequest
 import org.fractalx.netscope.client.grpc.proto.InvokeResponse
+import org.fractalx.netscope.client.grpc.proto.MethodInfo
 import org.fractalx.netscope.client.grpc.proto.NetScopeServiceGrpc
+import org.fractalx.netscope.client.grpc.proto.SetAttributeRequest
+import org.fractalx.netscope.client.grpc.proto.SetAttributeResponse
 import org.fractalx.netscope.client.proxy.NetScopeClientProxyFactory
 import org.fractalx.netscope.client.reactive.ReactiveSupport
 import reactor.core.publisher.Flux
@@ -21,6 +27,7 @@ import reactor.core.publisher.Mono
 import spock.lang.Specification
 
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -35,12 +42,19 @@ class NetScopeTemplateIntegrationSpec extends Specification {
 
     static class FakeNetScopeService extends NetScopeServiceGrpc.NetScopeServiceImplBase {
 
-        // Configure per-method responses before each test
-        Map<String, Value> responses   = [:]
-        List<InvokeRequest> received   = new CopyOnWriteArrayList<>()
+        // InvokeMethod
+        Map<String, Value>       responses          = [:]
+        List<InvokeRequest>      received           = new CopyOnWriteArrayList<>()
 
-        // For streaming tests: list of values to emit per method invocation
-        Map<String, List<Value>> streamResponses = [:]
+        // InvokeMethodStream
+        Map<String, List<Value>> streamResponses    = [:]
+
+        // SetAttribute
+        List<SetAttributeRequest> setAttrReceived   = new CopyOnWriteArrayList<>()
+        Map<String, Value>        setAttrPrevValues  = [:]   // previous value per attribute name
+
+        // GetDocs
+        DocsResponse docsResponseToReturn = DocsResponse.newBuilder().build()
 
         @Override
         void invokeMethod(InvokeRequest request, StreamObserver<InvokeResponse> observer) {
@@ -50,6 +64,23 @@ class NetScopeTemplateIntegrationSpec extends Specification {
                 Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build()
             )
             observer.onNext(InvokeResponse.newBuilder().setResult(result).build())
+            observer.onCompleted()
+        }
+
+        @Override
+        void setAttribute(SetAttributeRequest request, StreamObserver<SetAttributeResponse> observer) {
+            setAttrReceived << request
+            def prev = setAttrPrevValues.getOrDefault(
+                request.attributeName,
+                Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build()
+            )
+            observer.onNext(SetAttributeResponse.newBuilder().setPreviousValue(prev).build())
+            observer.onCompleted()
+        }
+
+        @Override
+        void getDocs(DocsRequest request, StreamObserver<DocsResponse> observer) {
+            observer.onNext(docsResponseToReturn)
             observer.onCompleted()
         }
 
@@ -72,6 +103,8 @@ class NetScopeTemplateIntegrationSpec extends Specification {
             responses.clear()
             received.clear()
             streamResponses.clear()
+            setAttrReceived.clear()
+            setAttrPrevValues.clear()
         }
     }
 
@@ -79,14 +112,22 @@ class NetScopeTemplateIntegrationSpec extends Specification {
 
     @NetScopeClient(server = "test-service", beanName = "TestBean")
     interface TestClient {
-        String greet(String name)
-        int    getCount()
-        boolean isEnabled()
-        void   ping()
+        String       greet(String name)
+        int          getCount()
+        boolean      isEnabled()
+        void         ping()
         List<String> listItems()
-        String multiArg(String a, int b)
-        Mono<String>    greetAsync(String name)
-        Flux<String>    streamWords()
+        String       multiArg(String a, int b)
+        Mono<String> greetAsync(String name)
+        Flux<String> streamWords()
+
+        // P1a: field write via SetAttribute RPC
+        @SetAttribute("counter")
+        int setCounter(int value)
+
+        // P1a: field name defaults to method name when @SetAttribute has no value
+        @SetAttribute
+        String description(String newValue)
     }
 
     // ── Infrastructure ────────────────────────────────────────────────────────
@@ -202,7 +243,6 @@ class NetScopeTemplateIntegrationSpec extends Specification {
 
     def "invoke: unavailable server throws NetScopeRemoteException"() {
         given:
-        // No service registered for this channel — force an error by using a dead channel
         def deadChannel = InProcessChannelBuilder.forName("nonexistent-server").directExecutor().build()
         def deadChannelFactory = Mock(NetScopeChannelFactory) {
             channelFor("dead") >> deadChannel
@@ -214,6 +254,201 @@ class NetScopeTemplateIntegrationSpec extends Specification {
         thrown(NetScopeRemoteException)
         cleanup:
         deadChannel.shutdown()
+    }
+
+    // ── P0: parameter_types auto-population ───────────────────────────────────
+
+    def "proxy: single-arg method sends its parameter type"() {
+        given:
+        fakeService.responses.greet = Value.newBuilder().setStringValue("hi").build()
+        when:
+        client.greet("Alice")
+        then:
+        fakeService.received[0].parameterTypesList == ["String"]
+    }
+
+    def "proxy: multi-arg method sends all parameter types in order"() {
+        given:
+        fakeService.responses.multiArg = Value.newBuilder().setStringValue("ok").build()
+        when:
+        client.multiArg("foo", 5)
+        then:
+        fakeService.received[0].parameterTypesList == ["String", "int"]
+    }
+
+    def "proxy: no-arg method sends empty parameter types list"() {
+        given:
+        fakeService.responses.getCount = Value.newBuilder().setNumberValue(1).build()
+        when:
+        client.getCount()
+        then:
+        fakeService.received[0].parameterTypesList.isEmpty()
+    }
+
+    def "template: withParameterTypes sends the specified type names"() {
+        given:
+        fakeService.responses.greet = Value.newBuilder().setStringValue("hi").build()
+        when:
+        template.server("test-service").bean("TestBean")
+            .withParameterTypes("String")
+            .invoke("greet", String.class, "Alice")
+        then:
+        fakeService.received[0].parameterTypesList == ["String"]
+    }
+
+    def "template: withParameterTypes overrides default empty list"() {
+        given:
+        fakeService.responses.process = Value.newBuilder().setStringValue("done").build()
+        when:
+        template.server("test-service").bean("TestBean")
+            .withParameterTypes("Object")
+            .invoke("process", String.class, "v")
+        then:
+        fakeService.received[0].parameterTypesList == ["Object"]
+    }
+
+    def "template: without withParameterTypes no parameter_types are sent"() {
+        given:
+        fakeService.responses.greet = Value.newBuilder().setStringValue("hi").build()
+        when:
+        template.server("test-service").bean("TestBean").invoke("greet", String.class, "Alice")
+        then:
+        fakeService.received[0].parameterTypesList.isEmpty()
+    }
+
+    def "template: withParameterTypes returns a new BeanStep without mutating the original"() {
+        given:
+        fakeService.responses.greet = Value.newBuilder().setStringValue("hi").build()
+        def beanStep = template.server("test-service").bean("TestBean")
+        def typedStep = beanStep.withParameterTypes("String")
+        when:
+        beanStep.invoke("greet", String.class, "Alice")
+        typedStep.invoke("greet", String.class, "Bob")
+        then:
+        fakeService.received[0].parameterTypesList.isEmpty()  // original untouched
+        fakeService.received[1].parameterTypesList == ["String"]
+    }
+
+    // ── P1a: SetAttribute — template ──────────────────────────────────────────
+
+    def "setAttribute: sends SetAttributeRequest with correct beanName and attributeName"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(0).build()
+        when:
+        template.server("test-service").bean("TestBean").setAttribute("counter", 42)
+        then:
+        fakeService.setAttrReceived.size() == 1
+        fakeService.setAttrReceived[0].beanName      == "TestBean"
+        fakeService.setAttrReceived[0].attributeName == "counter"
+    }
+
+    def "setAttribute: sends the new value in the request"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(0).build()
+        when:
+        template.server("test-service").bean("TestBean").setAttribute("counter", 99)
+        then:
+        fakeService.setAttrReceived[0].value.numberValue == 99.0d
+    }
+
+    def "setAttribute: returns the previous field value (untyped)"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(5).build()
+        when:
+        def prev = template.server("test-service").bean("TestBean").setAttribute("counter", 10)
+        then:
+        (prev as Double) == 5.0d
+    }
+
+    def "setAttribute: returns the previous field value typed to returnType"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(5).build()
+        when:
+        def prev = template.server("test-service").bean("TestBean").setAttribute("counter", 10, Integer.class)
+        then:
+        prev == 5
+    }
+
+    def "setAttribute: does NOT call InvokeMethod"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(0).build()
+        when:
+        template.server("test-service").bean("TestBean").setAttribute("counter", 1)
+        then:
+        fakeService.received.isEmpty()
+        fakeService.setAttrReceived.size() == 1
+    }
+
+    // ── P1a: SetAttribute — proxy @SetAttribute annotation ────────────────────
+
+    def "proxy @SetAttribute: dispatches to SetAttribute RPC with annotated field name"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(0).build()
+        when:
+        client.setCounter(99)
+        then:
+        fakeService.setAttrReceived.size() == 1
+        fakeService.setAttrReceived[0].attributeName == "counter"
+        fakeService.setAttrReceived[0].value.numberValue == 99.0d
+    }
+
+    def "proxy @SetAttribute: returns the previous value"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(7).build()
+        when:
+        def prev = client.setCounter(100)
+        then:
+        prev == 7
+    }
+
+    def "proxy @SetAttribute: does NOT call InvokeMethod"() {
+        given:
+        fakeService.setAttrPrevValues.counter = Value.newBuilder().setNumberValue(0).build()
+        when:
+        client.setCounter(1)
+        then:
+        fakeService.received.isEmpty()
+    }
+
+    def "proxy @SetAttribute: defaults field name to method name when value is blank"() {
+        given:
+        fakeService.setAttrPrevValues.description = Value.newBuilder().setStringValue("old").build()
+        when:
+        client.description("new desc")
+        then:
+        fakeService.setAttrReceived[0].attributeName == "description"
+    }
+
+    // ── P1b: GetDocs ──────────────────────────────────────────────────────────
+
+    def "getDocs: returns a non-null DocsResponse"() {
+        when:
+        def docs = template.server("test-service").getDocs()
+        then:
+        docs != null
+        docs instanceof DocsResponse
+    }
+
+    def "getDocs: returns the response from the server (empty by default)"() {
+        when:
+        def docs = template.server("test-service").getDocs()
+        then:
+        docs.methodsList.isEmpty()
+    }
+
+    def "getDocs: returns MethodInfo entries set by the server"() {
+        given:
+        def mi = MethodInfo.newBuilder()
+            .setBeanName("TestBean")
+            .setMemberName("greet")
+            .build()
+        fakeService.docsResponseToReturn = DocsResponse.newBuilder().addMethods(mi).build()
+        when:
+        def docs = template.server("test-service").getDocs()
+        then:
+        docs.methodsList.size() == 1
+        docs.methodsList[0].beanName   == "TestBean"
+        docs.methodsList[0].memberName == "greet"
     }
 
     // ── Proxy interface — blocking calls ──────────────────────────────────────
@@ -316,16 +551,14 @@ class NetScopeTemplateIntegrationSpec extends Specification {
 
     def "proxy: Mono error propagates as Mono error signal"() {
         given:
-        // No response registered → service returns null value → fromValue gives null → block() returns null
-        // To test error we need the server to throw; simulate via StatusRuntimeException
         grpcServer.shutdown().awaitTermination(1, TimeUnit.SECONDS)
         when:
         (client.greetAsync("x") as Mono<String>).block()
         then:
-        thrown(Exception)   // channel is shut down, so call fails
+        thrown(Exception)
     }
 
-    // ── Proxy interface — Flux<T> streaming ───────────────────────────────────
+    // ── Proxy interface — Flux<T> streaming (invokeFlux) ─────────────────────
 
     def "proxy: Flux<String> emits all streamed responses in order"() {
         given:
@@ -361,5 +594,154 @@ class NetScopeTemplateIntegrationSpec extends Specification {
         flux.collectList().block()
         then:
         fakeService.received.size() == 1
+    }
+
+    // ── P3: invokeBatchStream ─────────────────────────────────────────────────
+
+    def "invokeBatchStream: sends multiple requests over one gRPC stream"() {
+        given:
+        fakeService.streamResponses["greet"] = [Value.newBuilder().setStringValue("pong").build()]
+        when:
+        def results = (template.server("test-service").bean("TestBean")
+            .invokeBatchStream(String.class,
+                MethodCall.of("greet", "a"),
+                MethodCall.of("greet", "b")) as Flux<String>)
+            .collectList().block()
+        then:
+        results == ["pong", "pong"]
+        fakeService.received.size() == 2
+        fakeService.received[0].memberName == "greet"
+        fakeService.received[1].memberName == "greet"
+    }
+
+    def "invokeBatchStream: different method names within one stream"() {
+        given:
+        fakeService.streamResponses["greet"]    = [Value.newBuilder().setStringValue("hello").build()]
+        fakeService.streamResponses["listItems"] = [Value.newBuilder().setStringValue("item1").build()]
+        when:
+        def results = (template.server("test-service").bean("TestBean")
+            .invokeBatchStream(String.class,
+                MethodCall.of("greet", "x"),
+                MethodCall.of("listItems")) as Flux<String>)
+            .collectList().block()
+        then:
+        results == ["hello", "item1"]
+    }
+
+    def "invokeBatchStream: MethodCall.onBean overrides default bean name"() {
+        given:
+        fakeService.streamResponses["method"] = [Value.newBuilder().setStringValue("x").build()]
+        when:
+        (template.server("test-service").bean("TestBean")
+            .invokeBatchStream(String.class,
+                MethodCall.onBean("OtherBean", "method")) as Flux<String>)
+            .collectList().block()
+        then:
+        fakeService.received[0].beanName == "OtherBean"
+    }
+
+    def "invokeBatchStream: default bean name used when MethodCall has no bean override"() {
+        given:
+        fakeService.streamResponses["greet"] = [Value.newBuilder().setStringValue("hi").build()]
+        when:
+        (template.server("test-service").bean("TestBean")
+            .invokeBatchStream(String.class, MethodCall.of("greet")) as Flux<String>)
+            .collectList().block()
+        then:
+        fakeService.received[0].beanName == "TestBean"
+    }
+
+    def "invokeBatchStream: empty call list completes with empty Flux"() {
+        when:
+        def results = (template.server("test-service").bean("TestBean")
+            .invokeBatchStream(String.class) as Flux<String>)
+            .collectList().block()
+        then:
+        results.isEmpty()
+        fakeService.received.isEmpty()
+    }
+
+    // ── P3: BidiStreamSession ─────────────────────────────────────────────────
+
+    def "BidiStreamSession: sends requests and receives all responses"() {
+        given:
+        fakeService.streamResponses["greet"] = [Value.newBuilder().setStringValue("pong").build()]
+        def session = template.server("test-service").openBidiStream("TestBean", String.class)
+        def results = new CopyOnWriteArrayList<String>()
+        def latch = new CountDownLatch(2)
+
+        (session.responseFlux() as Flux<String>).subscribe(
+            { v -> results.add(v); latch.countDown() }, {}, {}
+        )
+
+        when:
+        session.send("greet", "1")
+        session.send("greet", "2")
+        session.complete()
+
+        then:
+        latch.await(3, TimeUnit.SECONDS)
+        results.size() == 2
+    }
+
+    def "BidiStreamSession: send returns the session itself for fluent chaining"() {
+        given:
+        fakeService.streamResponses["greet"] = [Value.newBuilder().setStringValue("ok").build()]
+        def session = template.server("test-service").openBidiStream("TestBean", String.class)
+        (session.responseFlux() as Flux<String>).subscribe({}, {}, {})
+
+        when:
+        def returned = session.send("greet")
+
+        then:
+        returned.is(session)
+
+        cleanup:
+        session.complete()
+    }
+
+    def "BidiStreamSession: sendTo with explicit beanName overrides the session default"() {
+        given:
+        fakeService.streamResponses["method"] = [Value.newBuilder().setStringValue("x").build()]
+        def session = template.server("test-service").openBidiStream("TestBean", String.class)
+        def latch = new CountDownLatch(1)
+        (session.responseFlux() as Flux<String>).subscribe({ latch.countDown() }, {}, {})
+
+        when:
+        session.sendTo("OtherBean", "method")
+        session.complete()
+
+        then:
+        latch.await(3, TimeUnit.SECONDS)
+        fakeService.received[0].beanName == "OtherBean"
+    }
+
+    def "BidiStreamSession: complete signals end of stream to the server"() {
+        given:
+        def session = template.server("test-service").openBidiStream("TestBean", String.class)
+        def completed = new CountDownLatch(1)
+        (session.responseFlux() as Flux<String>).subscribe({}, {}, { completed.countDown() })
+
+        when:
+        session.complete()
+
+        then:
+        completed.await(3, TimeUnit.SECONDS)
+    }
+
+    def "BidiStreamSession: openBidiStream with parameterTypes passes them on every request"() {
+        given:
+        fakeService.streamResponses["greet"] = [Value.newBuilder().setStringValue("ok").build()]
+        def session = template.server("test-service").openBidiStream("TestBean", String.class, "String")
+        def latch = new CountDownLatch(1)
+        (session.responseFlux() as Flux<String>).subscribe({ latch.countDown() }, {}, {})
+
+        when:
+        session.send("greet", "Alice")
+        session.complete()
+
+        then:
+        latch.await(3, TimeUnit.SECONDS)
+        fakeService.received[0].parameterTypesList == ["String"]
     }
 }

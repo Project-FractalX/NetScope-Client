@@ -1,6 +1,7 @@
 package org.fractalx.netscope.client.proxy;
 
 import org.fractalx.netscope.client.annotation.NetScopeClient;
+import org.fractalx.netscope.client.config.NetScopeClientConfig;
 import org.fractalx.netscope.client.core.NetScopeTemplate;
 import org.fractalx.netscope.client.exception.NetScopeClientException;
 import org.fractalx.netscope.client.reactive.ReactiveSupport;
@@ -50,8 +51,17 @@ public class NetScopeClientProxyFactory {
                 " must specify either 'server' or both 'host' and 'port'");
         }
 
+        // Build inline auth config when host+port are used (ignored for named-server clients)
+        NetScopeClientConfig.AuthConfig inlineAuth = null;
+        if (host != null && port > 0) {
+            inlineAuth = new NetScopeClientConfig.AuthConfig();
+            inlineAuth.setType(annotation.authType());
+            if (!annotation.apiKey().isBlank())        inlineAuth.setApiKey(annotation.apiKey());
+            if (!annotation.tokenProvider().isBlank()) inlineAuth.setTokenProvider(annotation.tokenProvider());
+        }
+
         NetScopeInvocationHandler handler = new NetScopeInvocationHandler(
-                template, serverName, host, port, annotation.beanName(), reactiveSupport);
+                template, serverName, host, port, annotation.beanName(), reactiveSupport, inlineAuth);
 
         return (T) Proxy.newProxyInstance(
                 interfaceType.getClassLoader(),
