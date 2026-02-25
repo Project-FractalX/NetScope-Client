@@ -9,18 +9,18 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.2</version>
+        <version>3.4.13</version>
         <relativePath/>
     </parent>
 
     <groupId>org.fractalx</groupId>
     <artifactId>netscope-client</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>NetScope Client</name>
     <description>Spring Boot client library that abstracts NetScope-Server gRPC communication to plain Java method calls via annotated interfaces</description>
-    <url>https://github.com/project-FractalX/NetScope</url>
+    <url>https://github.com/project-FractalX/NetScope-Client</url>
 
     <licenses>
         <license>
@@ -41,9 +41,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/project-FractalX/NetScope.git</connection>
-        <developerConnection>scm:git:ssh://github.com/project-FractalX/NetScope.git</developerConnection>
-        <url>https://github.com/project-FractalX/NetScope/tree/main</url>
+        <connection>scm:git:git://github.com/project-FractalX/NetScope-Client.git</connection>
+        <developerConnection>scm:git:ssh://github.com/project-FractalX/NetScope-Client.git</developerConnection>
+        <url>https://github.com/project-FractalX/NetScope-Client/tree/main</url>
     </scm>
 
     <properties>

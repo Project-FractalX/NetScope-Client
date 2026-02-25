@@ -4,6 +4,7 @@ import org.fractalx.netscope.client.annotation.EnableNetScopeClient;
 import org.fractalx.netscope.client.annotation.NetScopeClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.FactoryBean;
 import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
@@ -68,7 +69,21 @@ public class NetScopeClientRegistrar
                         .genericBeanDefinition(NetScopeClientFactoryBean.class)
                         .addConstructorArgValue(className);
 
-                registry.registerBeanDefinition(beanName, builder.getBeanDefinition());
+                // Publish the produced type so Spring can resolve it without eager instantiation.
+                // We store the Class<?> object (not the String name) so that
+                // AbstractBeanFactory.getTypeForFactoryBeanFromAttributes() can return it
+                // directly without calling ClassUtils.forName(), which uses the framework
+                // classloader and can throw IllegalStateException in Spring Boot fat-jar setups.
+                BeanDefinition beanDef = builder.getBeanDefinition();
+                try {
+                    beanDef.setAttribute(FactoryBean.OBJECT_TYPE_ATTRIBUTE, Class.forName(className));
+                } catch (ClassNotFoundException ignored) {
+                    // Defensive: should never happen here since the scanner already loaded
+                    // the class to read @NetScopeClient metadata. If it does, getObjectType()
+                    // still resolves the type at first-use time.
+                }
+
+                registry.registerBeanDefinition(beanName, beanDef);
             }
         }
     }
@@ -116,13 +131,17 @@ public class NetScopeClientRegistrar
     }
 
     private String resolveBeanName(String className, BeanDefinition candidate) {
-        // Use @NetScopeClient.value() if set, otherwise decapitalize interface simple name
+        // Use @NetScopeClient.value() if set, otherwise decapitalize interface simple name.
+        // Use Class.getSimpleName() (not substring-after-dot) so that nested classes
+        // (e.g. test fixtures compiled as OuterClass$InnerInterface) resolve correctly.
         try {
             Class<?> clazz = Class.forName(className);
             NetScopeClient annotation = clazz.getAnnotation(NetScopeClient.class);
             if (annotation != null && !annotation.value().isBlank()) {
                 return annotation.value();
             }
+            String simpleName = clazz.getSimpleName();
+            return Character.toLowerCase(simpleName.charAt(0)) + simpleName.substring(1);
         } catch (ClassNotFoundException ignored) {}
 
         int lastDot = className.lastIndexOf('.');

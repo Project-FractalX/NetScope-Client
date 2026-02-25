@@ -1,6 +1,7 @@
 package org.fractalx.netscope.client.annotation;
 
 import org.fractalx.netscope.client.config.NetScopeClientConfig;
+import org.springframework.stereotype.Component;
 
 import java.lang.annotation.*;
 
@@ -45,6 +46,7 @@ import java.lang.annotation.*;
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
+@Component
 public @interface NetScopeClient {
 
     /**
