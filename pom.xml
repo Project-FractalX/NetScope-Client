@@ -15,7 +15,7 @@
 
     <groupId>org.fractalx</groupId>
     <artifactId>netscope-client</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>NetScope Client</name>
@@ -41,9 +41,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/project-FractalX/NetScope.git</connection>
-        <developerConnection>scm:git:ssh://github.com/project-FractalX/NetScope.git</developerConnection>
-        <url>https://github.com/project-FractalX/NetScope/tree/main</url>
+        <connection>scm:git:git://github.com/project-FractalX/NetScope-Client.git</connection>
+        <developerConnection>scm:git:ssh://github.com/project-FractalX/NetScope-Client.git</developerConnection>
+        <url>https://github.com/project-FractalX/NetScope-Client/tree/main</url>
     </scm>
 
     <properties>
